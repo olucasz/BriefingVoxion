@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voxion Studio | Briefing de Identidade Visual</title>
+    <meta
+      name="description"
+      content="Questionário de briefing para projetos de identidade visual da Voxion Studio."
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#inicio" aria-label="Voxion Studio">
+        <img src="assets/voxion-mark-orange-crop.png" alt="Voxion Studio" />
+      </a>
+      <div class="topbar__actions" aria-label="Ações do briefing">
+        <button class="button button--ghost" id="resetForm" type="button">Limpar</button>
+        <button class="button" id="exportText" type="button">Enviar respostas</button>
+      </div>
+    </header>
+
+    <main class="app-shell">
+      <section class="workspace">
+        <section class="hero" id="inicio">
+          <div class="hero__content">
+            <h1>Questionário de Briefing</h1>
+            <p>
+              Identidade visual para entender o negócio, alinhar expectativas
+              e transformar ideias em direção criativa.
+            </p>
+          </div>
+        </section>
+
+        <section class="progress-strip" aria-label="Progresso do preenchimento">
+          <div>
+            <strong id="progressLabel">0%</strong>
+            <span>preenchido</span>
+          </div>
+          <div class="progress-track">
+            <span id="progressBar"></span>
+          </div>
+        </section>
+
+        <form id="briefingForm" class="briefing-form"></form>
+      </section>
+    </main>
+
+    <dialog id="exportDialog">
+      <div class="dialog__header">
+        <h2>Respostas exportadas</h2>
+        <button class="icon-button" id="closeDialog" type="button" aria-label="Fechar">×</button>
+      </div>
+      <textarea id="exportOutput" readonly></textarea>
+      <div class="dialog__actions">
+        <button class="button button--ghost" id="copyExport" type="button">Copiar texto</button>
+        <button class="button" id="downloadExport" type="button">Baixar .txt</button>
+      </div>
+    </dialog>
+
+    <script src="script.js"></script>
+  </body>
+</html>

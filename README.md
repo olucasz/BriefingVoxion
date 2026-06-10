@@ -36,19 +36,7 @@ http://127.0.0.1:8787
 
 ## Variaveis de ambiente
 
-```txt
-PORT=8787
-HOST=0.0.0.0
 
-EMAIL_TO=contato@seudominio.com
-SMTP_HOST=smtp.hostinger.com
-SMTP_PORT=465
-SMTP_SECURE=true
-SMTP_USER=contato@seudominio.com
-SMTP_PASS=sua-senha-ou-app-password
-SMTP_FROM=contato@seudominio.com
-SMTP_FROM_NAME=Voxion Studio
-```
 
 Se o SMTP ou o `EMAIL_TO` nao estiverem configurados, o sistema continua gerando e salvando o PDF no servidor, mas nao envia e-mail.
 

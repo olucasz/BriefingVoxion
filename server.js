@@ -1,90 +1,157 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
-const net = require("node:net");
-const tls = require("node:tls");
 const crypto = require("node:crypto");
 
-const ROOT = path.resolve(__dirname, "..");
-const SITE_DIR = path.join(ROOT, "site");
-const SUBMISSIONS_DIR = path.join(ROOT, "submissions");
-const PORT = Number(process.env.PORT || 8787);
-const EMAIL_TO = process.env.EMAIL_TO || "griccoparaizo@gmail.com";
+const nodemailer = require("nodemailer");
+const PDFDocument = require("pdfkit");
 
-loadEnv(path.join(ROOT, ".env"));
+const ROOT = __dirname;
+const PUBLIC_DIR = path.join(ROOT, "public");
+const SUBMISSIONS_DIR = path.join(ROOT, "submissions");
+const ENV_PATH = path.join(ROOT, ".env");
+const LOGO_PATH = path.join(PUBLIC_DIR, "assets", "voxion-mark-orange-crop.png");
+const MAX_BODY_SIZE = 2_000_000;
+
+const CONTENT_TYPES = {
+  ".css": "text/css; charset=utf-8",
+  ".gif": "image/gif",
+  ".html": "text/html; charset=utf-8",
+  ".ico": "image/x-icon",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".otf": "font/otf",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".ttc": "font/collection",
+  ".ttf": "font/ttf",
+  ".webp": "image/webp",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
+const PROMPT_LABELS = new Set([
+  "Situação atual da marca",
+  "A marca deve parecer mais",
+  "Nível de mudança desejado",
+  "Sensações desejadas",
+  "Canais prioritários",
+  "Estilo visual preferido",
+  "Complexidade visual",
+  "Uso de cor",
+  "Posicionamento de preço/percepção",
+  "Possíveis usos da identidade",
+]);
+
+const BRAND = {
+  accent: "#f18536",
+  background: "#fffaf6",
+  brown: "#31251f",
+  line: "#d8c5b6",
+  muted: "#5c4a41",
+};
+
+loadEnv(ENV_PATH);
+
+const PORT = Number(process.env.PORT || 8787);
+const HOST = process.env.HOST || "0.0.0.0";
+
 fs.mkdirSync(SUBMISSIONS_DIR, { recursive: true });
 
-const server = http.createServer(async (req, res) => {
-  try {
-    setCorsHeaders(res);
-
-    if (req.method === "OPTIONS") {
-      res.writeHead(204);
+const server = http.createServer((req, res) => {
+  routeRequest(req, res).catch((error) => {
+    const statusCode = error instanceof HttpError ? error.statusCode : 500;
+    if (statusCode >= 500) {
+      console.error(error);
+    }
+    if (res.headersSent) {
       res.end();
       return;
     }
-
-    if (req.method === "POST" && req.url === "/api/briefings") {
-      await handleBriefing(req, res);
-      return;
-    }
-
-    if (req.method === "GET") {
-      serveStatic(req, res);
-      return;
-    }
-
-    sendJson(res, 405, { ok: false, error: "Metodo nao permitido." });
-  } catch (error) {
-    console.error(error);
-    sendJson(res, 500, { ok: false, error: "Erro interno no servidor." });
-  }
+    sendJson(res, statusCode, {
+      ok: false,
+      error: error.message || "Erro interno no servidor.",
+    });
+  });
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  console.log(`Voxion briefing backend rodando em http://127.0.0.1:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`Voxion briefing rodando em http://${HOST}:${PORT}`);
 });
 
-async function handleBriefing(req, res) {
-  const body = await readJson(req);
-  const text = String(body.text || "").trim();
-  const clientName = sanitizeName(body.clientName || "briefing");
+async function routeRequest(req, res) {
+  setCorsHeaders(res);
 
-  if (!text) {
-    sendJson(res, 400, { ok: false, error: "Nenhuma resposta foi recebida." });
+  const pathname = getPathname(req.url);
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
     return;
   }
 
-  const createdAt = new Date();
-  const id = `${formatDateForFile(createdAt)}-${clientName}-${crypto.randomBytes(3).toString("hex")}`;
-  const pdfBuffer = buildPdfBuffer(text);
-  const pdfPath = path.join(SUBMISSIONS_DIR, `${id}.pdf`);
-  const textPath = path.join(SUBMISSIONS_DIR, `${id}.txt`);
+  if (req.method === "GET" && pathname === "/api/health") {
+    sendJson(res, 200, {
+      ok: true,
+      status: "up",
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
 
-  fs.writeFileSync(pdfPath, pdfBuffer);
-  fs.writeFileSync(textPath, text, "utf8");
+  if (req.method === "POST" && pathname === "/api/briefings") {
+    await handleBriefing(req, res);
+    return;
+  }
+
+  if (req.method === "GET" || req.method === "HEAD") {
+    serveStatic(pathname, req.method === "HEAD", res);
+    return;
+  }
+
+  throw new HttpError(405, "Metodo nao permitido.");
+}
+
+async function handleBriefing(req, res) {
+  const body = await readJson(req);
+  const text = normalizeBriefingText(body.text);
+  const clientName = normalizeClientName(body.clientName);
+
+  if (!text) {
+    throw new HttpError(400, "Nenhuma resposta foi recebida.");
+  }
+
+  const createdAt = new Date();
+  const submissionId = `${formatDateForFile(createdAt)}-${sanitizeName(clientName)}-${crypto.randomBytes(3).toString("hex")}`;
+  const pdfBuffer = await buildPdfBuffer({ clientName, createdAt, submissionId, text });
+  const pdfFilename = `${submissionId}.pdf`;
+  const textFilename = `${submissionId}.txt`;
+  const pdfPath = path.join(SUBMISSIONS_DIR, pdfFilename);
+  const textPath = path.join(SUBMISSIONS_DIR, textFilename);
+
+  await Promise.all([
+    fs.promises.writeFile(pdfPath, pdfBuffer),
+    fs.promises.writeFile(textPath, `${text}\n`, "utf8"),
+  ]);
 
   const email = {
-    sent: false,
-    configured: hasSmtpConfig(),
+    configured: hasEmailConfig(),
     error: null,
+    sent: false,
   };
 
   if (email.configured) {
     try {
-      await sendEmail({
-        to: EMAIL_TO,
-        subject: `Novo briefing de identidade visual - ${clientName}`,
-        text: [
-          "Ola,",
-          "",
-          "Um novo questionario de briefing foi enviado pelo site da Voxion.",
-          "O PDF com as respostas esta anexado a este e-mail.",
-          "",
-          `Arquivo: ${path.basename(pdfPath)}`,
-        ].join("\n"),
-        attachmentName: `briefing-voxion-${clientName}.pdf`,
-        attachmentBuffer: pdfBuffer,
+      await sendSubmissionEmail({
+        clientName,
+        createdAt,
+        pdfBuffer,
+        pdfFilename,
+        submissionId,
+        text,
+        textFilename,
       });
       email.sent = true;
     } catch (error) {
@@ -94,35 +161,97 @@ async function handleBriefing(req, res) {
 
   sendJson(res, email.sent ? 200 : 202, {
     ok: true,
-    emailSent: email.sent,
     emailConfigured: email.configured,
     emailError: email.error,
-    savedAs: path.basename(pdfPath),
+    emailSent: email.sent,
+    savedAs: {
+      pdf: pdfFilename,
+      text: textFilename,
+    },
   });
 }
 
-function loadEnv(filePath) {
-  if (!fs.existsSync(filePath)) return;
-  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const eq = trimmed.indexOf("=");
-    if (eq === -1) continue;
-    const key = trimmed.slice(0, eq).trim();
-    let value = trimmed.slice(eq + 1).trim();
-    value = value.replace(/^["']|["']$/g, "");
-    if (!(key in process.env)) process.env[key] = value;
+function serveStatic(pathname, headOnly, res) {
+  const requestedPath = pathname === "/" ? "/index.html" : pathname;
+  const filePath = path.resolve(PUBLIC_DIR, `.${requestedPath}`);
+
+  if (!isSafePublicPath(filePath)) {
+    throw new HttpError(404, "Arquivo nao encontrado.");
+  }
+
+  const ext = path.extname(filePath).toLowerCase();
+  const contentType = CONTENT_TYPES[ext];
+  if (!contentType) {
+    throw new HttpError(404, "Arquivo nao encontrado.");
+  }
+
+  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    throw new HttpError(404, "Arquivo nao encontrado.");
+  }
+
+  const stats = fs.statSync(filePath);
+  res.writeHead(200, {
+    "Cache-Control": ext === ".html" ? "no-cache" : "public, max-age=604800, immutable",
+    "Content-Length": stats.size,
+    "Content-Type": contentType,
+  });
+
+  if (headOnly) {
+    res.end();
+    return;
+  }
+
+  fs.createReadStream(filePath).pipe(res);
+}
+
+function isSafePublicPath(filePath) {
+  return filePath === PUBLIC_DIR || filePath.startsWith(`${PUBLIC_DIR}${path.sep}`);
+}
+
+function getPathname(url) {
+  try {
+    return new URL(url || "/", "http://localhost").pathname;
+  } catch {
+    return "/";
   }
 }
 
-function hasSmtpConfig() {
-  return Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let raw = "";
+    let settled = false;
+
+    req.on("data", (chunk) => {
+      if (settled) return;
+
+      raw += chunk;
+      if (raw.length > MAX_BODY_SIZE) {
+        settled = true;
+        reject(new HttpError(413, "Payload muito grande."));
+        req.destroy();
+      }
+    });
+
+    req.on("end", () => {
+      if (settled) return;
+
+      try {
+        resolve(raw ? JSON.parse(raw) : {});
+      } catch {
+        reject(new HttpError(400, "JSON invalido."));
+      }
+    });
+
+    req.on("error", (error) => {
+      if (settled) return;
+      reject(error);
+    });
+  });
 }
 
 function setCorsHeaders(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
@@ -131,62 +260,54 @@ function sendJson(res, status, payload) {
   res.end(JSON.stringify(payload));
 }
 
-function readJson(req) {
-  return new Promise((resolve, reject) => {
-    let raw = "";
-    req.on("data", (chunk) => {
-      raw += chunk;
-      if (raw.length > 2_000_000) {
-        req.destroy();
-        reject(new Error("Payload muito grande."));
-      }
-    });
-    req.on("end", () => {
-      try {
-        resolve(raw ? JSON.parse(raw) : {});
-      } catch {
-        reject(new Error("JSON invalido."));
-      }
-    });
-    req.on("error", reject);
-  });
-}
+function loadEnv(filePath) {
+  if (!fs.existsSync(filePath)) return;
 
-function serveStatic(req, res) {
-  const urlPath = decodeURIComponent(req.url.split("?")[0]);
-  const requestedPath = urlPath === "/" ? "/index.html" : urlPath;
-  const filePath = path.normalize(path.join(SITE_DIR, requestedPath));
+  const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
 
-  if (!filePath.startsWith(SITE_DIR) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end("Arquivo nao encontrado.");
-    return;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    value = value.replace(/^["']|["']$/g, "");
+
+    if (!(key in process.env)) {
+      process.env[key] = value;
+    }
   }
-
-  res.writeHead(200, { "Content-Type": contentType(filePath) });
-  fs.createReadStream(filePath).pipe(res);
 }
 
-function contentType(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  return {
-    ".html": "text/html; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".js": "application/javascript; charset=utf-8",
-    ".png": "image/png",
-    ".webp": "image/webp",
-    ".otf": "font/otf",
-    ".ttc": "font/collection",
-  }[ext] || "application/octet-stream";
+function hasEmailConfig() {
+  return Boolean(
+    process.env.EMAIL_TO &&
+      process.env.SMTP_HOST &&
+      process.env.SMTP_USER &&
+      process.env.SMTP_PASS
+  );
+}
+
+function normalizeClientName(value) {
+  const normalized = String(value || "").trim();
+  return normalized || "Briefing sem nome";
+}
+
+function normalizeBriefingText(value) {
+  return String(value || "").replace(/\r/g, "").trim();
 }
 
 function sanitizeName(value) {
-  return String(value || "briefing")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/gi, "-")
-    .replace(/(^-|-$)/g, "")
-    .toLowerCase() || "briefing";
+  return (
+    String(value || "briefing")
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/gi, "-")
+      .replace(/(^-|-$)/g, "")
+      .toLowerCase() || "briefing"
+  );
 }
 
 function formatDateForFile(date) {
@@ -201,192 +322,330 @@ function formatDateForFile(date) {
   ].join("");
 }
 
-function wrapPdfText(text, maxChars = 82) {
-  const lines = [];
-  String(text || "").replace(/\r/g, "").split("\n").forEach((paragraph) => {
-    const words = paragraph.split(/\s+/).filter(Boolean);
-    if (!words.length) {
-      lines.push("");
-      return;
-    }
-    let line = "";
-    words.forEach((word) => {
-      const next = line ? `${line} ${word}` : word;
-      if (next.length > maxChars) {
-        if (line) lines.push(line);
-        line = word;
-      } else {
-        line = next;
-      }
-    });
-    if (line) lines.push(line);
-  });
-  return lines;
+function formatDateForDisplay(date) {
+  return new Intl.DateTimeFormat("pt-BR", {
+    dateStyle: "long",
+    timeStyle: "short",
+  }).format(date);
 }
 
-function pdfHex(text) {
-  const utf16 = Buffer.from(`\uFEFF${text}`, "utf16le");
-  for (let i = 0; i < utf16.length; i += 2) {
-    const a = utf16[i];
-    utf16[i] = utf16[i + 1];
-    utf16[i + 1] = a;
-  }
-  return utf16.toString("hex").toUpperCase();
-}
-
-function buildPdfBuffer(text) {
-  const pageWidth = 595.28;
-  const pageHeight = 841.89;
-  const margin = 48;
-  const lineHeight = 14;
-  const linesPerPage = Math.floor((pageHeight - margin * 2) / lineHeight);
-  const allLines = wrapPdfText(text);
-  const pages = [];
-
-  for (let i = 0; i < allLines.length; i += linesPerPage) {
-    pages.push(allLines.slice(i, i + linesPerPage));
-  }
-  if (!pages.length) pages.push([""]);
-
-  const objects = [];
-  objects.push("<< /Type /Catalog /Pages 2 0 R >>");
-  objects.push(`<< /Type /Pages /Kids [${pages.map((_, index) => `${3 + index * 2} 0 R`).join(" ")}] /Count ${pages.length} >>`);
-
-  pages.forEach((pageLines, index) => {
-    const pageObjectNumber = 3 + index * 2;
-    const contentObjectNumber = pageObjectNumber + 1;
-    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> /F2 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >> >> >> /Contents ${contentObjectNumber} 0 R >>`);
-
-    let stream = "BT\n/F1 10 Tf\n";
-    let y = pageHeight - margin;
-    pageLines.forEach((line) => {
-      const isTitle = /^(\d{2}\.|VOXION|Identidade visual)/.test(line);
-      stream += isTitle ? "/F2 11 Tf\n" : "/F1 10 Tf\n";
-      stream += `1 0 0 1 ${margin} ${y.toFixed(2)} Tm <${pdfHex(line)}> Tj\n`;
-      y -= lineHeight;
-    });
-    stream += "ET";
-    objects.push(`<< /Length ${Buffer.byteLength(stream, "binary")} >>\nstream\n${stream}\nendstream`);
-  });
-
-  let pdf = "%PDF-1.4\n";
-  const offsets = [0];
-  objects.forEach((object, index) => {
-    offsets.push(Buffer.byteLength(pdf, "binary"));
-    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
-  });
-
-  const xrefOffset = Buffer.byteLength(pdf, "binary");
-  pdf += `xref\n0 ${objects.length + 1}\n`;
-  pdf += "0000000000 65535 f \n";
-  offsets.slice(1).forEach((offset) => {
-    pdf += `${String(offset).padStart(10, "0")} 00000 n \n`;
-  });
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
-
-  return Buffer.from(pdf, "binary");
-}
-
-async function sendEmail({ to, subject, text, attachmentName, attachmentBuffer }) {
-  const host = process.env.SMTP_HOST;
-  const port = Number(process.env.SMTP_PORT || 465);
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-  const from = process.env.SMTP_FROM || user;
-
-  const client = await connectSmtp(host, port);
-  try {
-    await smtpRead(client);
-    await smtpCommand(client, `EHLO ${process.env.SMTP_DOMAIN || "localhost"}`);
-    await smtpCommand(client, "AUTH LOGIN");
-    await smtpCommand(client, Buffer.from(user).toString("base64"));
-    await smtpCommand(client, Buffer.from(pass).toString("base64"));
-    await smtpCommand(client, `MAIL FROM:<${from}>`);
-    await smtpCommand(client, `RCPT TO:<${to}>`);
-    await smtpCommand(client, "DATA", 354);
-    client.write(buildMimeMessage({ from, to, subject, text, attachmentName, attachmentBuffer }) + "\r\n.\r\n");
-    await smtpRead(client, 250);
-    await smtpCommand(client, "QUIT", 221).catch(() => {});
-  } finally {
-    client.end();
-  }
-}
-
-function connectSmtp(host, port) {
+function buildPdfBuffer({ clientName, createdAt, submissionId, text }) {
   return new Promise((resolve, reject) => {
-    const options = { host, port, servername: host };
-    const socket = port === 465 ? tls.connect(options) : net.connect(options);
-    socket.setEncoding("utf8");
-    socket.once("error", reject);
-    socket.once("connect", () => {
-      socket.off("error", reject);
-      resolve(socket);
+    const doc = new PDFDocument({
+      autoFirstPage: true,
+      bufferPages: false,
+      margins: { top: 54, right: 56, bottom: 54, left: 56 },
+      size: "A4",
     });
-    if (port === 465) {
-      socket.once("secureConnect", () => {
-        socket.off("error", reject);
-        resolve(socket);
-      });
-    }
-  });
-}
 
-function smtpRead(socket, expectedCode) {
-  return new Promise((resolve, reject) => {
-    let buffer = "";
-    const onData = (chunk) => {
-      buffer += chunk;
-      const lines = buffer.split(/\r?\n/).filter(Boolean);
-      const last = lines[lines.length - 1] || "";
-      if (!/^\d{3} /.test(last)) return;
-      socket.off("data", onData);
-      const code = Number(last.slice(0, 3));
-      if (expectedCode && code !== expectedCode) {
-        reject(new Error(`SMTP esperava ${expectedCode}, recebeu ${code}: ${buffer}`));
-      } else if (code >= 400) {
-        reject(new Error(`SMTP erro ${code}: ${buffer}`));
-      } else {
-        resolve(buffer);
-      }
+    const chunks = [];
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.on("error", reject);
+
+    doc.info = {
+      Author: "Voxion Studio",
+      CreationDate: createdAt,
+      Creator: "Voxion Briefing",
+      Producer: "PDFKit",
+      Subject: "Briefing de identidade visual",
+      Title: `Briefing Voxion - ${clientName}`,
     };
-    socket.on("data", onData);
+
+    drawCoverPage(doc, { clientName, createdAt, submissionId });
+    doc.addPage();
+    drawContentHeader(doc, { clientName, createdAt }, false);
+    renderBriefingContent(doc, { clientName, createdAt }, text);
+
+    doc.end();
   });
 }
 
-async function smtpCommand(socket, command, expectedCode) {
-  socket.write(command + "\r\n");
-  return smtpRead(socket, expectedCode);
+function drawCoverPage(doc, meta) {
+  const { left, right, top } = doc.page.margins;
+  const contentWidth = doc.page.width - left - right;
+
+  doc.rect(0, 0, doc.page.width, doc.page.height).fill(BRAND.background);
+  doc.rect(0, 0, doc.page.width, 14).fill(BRAND.accent);
+
+  if (fs.existsSync(LOGO_PATH)) {
+    doc.image(LOGO_PATH, left, top + 18, { fit: [56, 56] });
+  }
+
+  doc.fillColor(BRAND.accent);
+  doc.font("Helvetica-Bold");
+  doc.fontSize(11);
+  doc.text("VOXION STUDIO", left + 72, top + 24, { width: contentWidth - 72 });
+
+  doc.fillColor(BRAND.brown);
+  doc.fontSize(28);
+  doc.text("Briefing de Identidade Visual", left, top + 110, { width: contentWidth });
+
+  doc.fillColor(BRAND.muted);
+  doc.font("Helvetica");
+  doc.fontSize(12);
+  doc.text(
+    "Documento gerado automaticamente a partir do formulario enviado pelo site.",
+    left,
+    top + 172,
+    { width: contentWidth, lineGap: 4 }
+  );
+
+  const cardTop = top + 250;
+  doc.roundedRect(left, cardTop, contentWidth, 142, 16).fillAndStroke("#fff", BRAND.line);
+
+  doc.fillColor(BRAND.muted);
+  doc.fontSize(10);
+  doc.text("Cliente", left + 24, cardTop + 24);
+
+  doc.fillColor(BRAND.brown);
+  doc.font("Helvetica-Bold");
+  doc.fontSize(18);
+  doc.text(meta.clientName, left + 24, cardTop + 40, { width: contentWidth - 48 });
+
+  doc.fillColor(BRAND.muted);
+  doc.font("Helvetica");
+  doc.fontSize(10);
+  doc.text("Gerado em", left + 24, cardTop + 86);
+
+  doc.fillColor(BRAND.brown);
+  doc.font("Helvetica-Bold");
+  doc.fontSize(12);
+  doc.text(formatDateForDisplay(meta.createdAt), left + 24, cardTop + 102, {
+    width: contentWidth - 48,
+  });
+
+  doc.fillColor(BRAND.muted);
+  doc.font("Helvetica");
+  doc.fontSize(10);
+  doc.text(`Protocolo: ${meta.submissionId}`, left, doc.page.height - 92, {
+    align: "center",
+    width: contentWidth,
+  });
 }
 
-function buildMimeMessage({ from, to, subject, text, attachmentName, attachmentBuffer }) {
-  const boundary = `voxion-${crypto.randomBytes(12).toString("hex")}`;
-  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject, "utf8").toString("base64")}?=`;
-  const attachmentBase64 = wrapBase64(attachmentBuffer.toString("base64"));
+function drawContentHeader(doc, meta, isContinuation) {
+  const { left, right, top } = doc.page.margins;
+  const contentWidth = doc.page.width - left - right;
 
-  return [
-    `From: Voxion Studio <${from}>`,
-    `To: ${to}`,
-    `Subject: ${encodedSubject}`,
-    "MIME-Version: 1.0",
-    `Content-Type: multipart/mixed; boundary="${boundary}"`,
-    "",
-    `--${boundary}`,
-    "Content-Type: text/plain; charset=utf-8",
-    "Content-Transfer-Encoding: 8bit",
-    "",
-    text,
-    "",
-    `--${boundary}`,
-    `Content-Type: application/pdf; name="${attachmentName}"`,
-    "Content-Transfer-Encoding: base64",
-    `Content-Disposition: attachment; filename="${attachmentName}"`,
-    "",
-    attachmentBase64,
-    "",
-    `--${boundary}--`,
-  ].join("\r\n");
+  doc.rect(0, 0, doc.page.width, doc.page.height).fill(BRAND.background);
+  doc.rect(0, 0, doc.page.width, 10).fill(BRAND.accent);
+
+  if (fs.existsSync(LOGO_PATH)) {
+    doc.image(LOGO_PATH, left, top - 10, { fit: [28, 28] });
+  }
+
+  doc.fillColor(BRAND.accent);
+  doc.font("Helvetica-Bold");
+  doc.fontSize(10);
+  doc.text("VOXION STUDIO", left + 38, top - 6);
+
+  doc.fillColor(BRAND.muted);
+  doc.font("Helvetica");
+  doc.fontSize(9);
+  doc.text(
+    isContinuation ? "Continuação do briefing" : meta.clientName,
+    left,
+    top - 6,
+    { align: "right", width: contentWidth }
+  );
+
+  doc.moveTo(left, top + 22);
+  doc.lineTo(doc.page.width - right, top + 22);
+  doc.lineWidth(1);
+  doc.strokeColor(BRAND.line);
+  doc.stroke();
+
+  doc.y = top + 38;
 }
 
-function wrapBase64(value) {
-  return String(value).replace(/.{1,76}/g, "$&\r\n").trim();
+function renderBriefingContent(doc, meta, text) {
+  const lines = text.split("\n");
+  let hasContent = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+
+    if (!line) {
+      doc.moveDown(0.45);
+      continue;
+    }
+
+    if (line === "VOXION STUDIO | QUESTIONÁRIO DE BRIEFING" || line === "Identidade visual") {
+      continue;
+    }
+
+    if (/^\d{2}\.\s/.test(line)) {
+      ensureSpace(doc, meta, 52);
+      doc.moveDown(0.35);
+      doc.fillColor(BRAND.accent);
+      doc.font("Helvetica-Bold");
+      doc.fontSize(15);
+      doc.text(line, { lineGap: 2 });
+      doc.moveDown(0.18);
+      continue;
+    }
+
+    if (isPromptLine(line)) {
+      ensureSpace(doc, meta, 38);
+      doc.fillColor(BRAND.brown);
+      doc.font("Helvetica-Bold");
+      doc.fontSize(11.5);
+      doc.text(line, { lineGap: 2 });
+      doc.moveDown(0.12);
+      continue;
+    }
+
+    ensureSpace(doc, meta, 32);
+    doc.fillColor(BRAND.muted);
+    doc.font("Helvetica");
+    doc.fontSize(10.5);
+    doc.text(line, { lineGap: 3 });
+    doc.moveDown(0.45);
+    hasContent = true;
+  }
+
+  if (!hasContent) {
+    doc.fillColor(BRAND.muted);
+    doc.font("Helvetica");
+    doc.fontSize(11);
+    doc.text("Nenhuma resposta foi encontrada para compor o briefing.");
+  }
+}
+
+function ensureSpace(doc, meta, minHeight) {
+  const bottomLimit = doc.page.height - doc.page.margins.bottom;
+  if (doc.y + minHeight <= bottomLimit) return;
+
+  doc.addPage();
+  drawContentHeader(doc, meta, true);
+}
+
+function isPromptLine(line) {
+  return line.endsWith("?") || PROMPT_LABELS.has(line);
+}
+
+async function sendSubmissionEmail({
+  clientName,
+  createdAt,
+  pdfBuffer,
+  pdfFilename,
+  submissionId,
+  text,
+  textFilename,
+}) {
+  const transport = nodemailer.createTransport({
+    auth: {
+      pass: process.env.SMTP_PASS,
+      user: process.env.SMTP_USER,
+    },
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 465),
+    secure: parseBoolean(process.env.SMTP_SECURE, Number(process.env.SMTP_PORT || 465) === 465),
+  });
+
+  const previewLines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+
+  await transport.sendMail({
+    attachments: [
+      {
+        content: pdfBuffer,
+        contentType: "application/pdf",
+        filename: pdfFilename,
+      },
+      {
+        content: `${text}\n`,
+        contentType: "text/plain; charset=utf-8",
+        filename: textFilename,
+      },
+    ],
+    from: {
+      address: process.env.SMTP_FROM || process.env.SMTP_USER,
+      name: process.env.SMTP_FROM_NAME || "Voxion Studio",
+    },
+    html: buildEmailHtml({ clientName, createdAt, previewLines, submissionId }),
+    subject: `Novo briefing de identidade visual - ${clientName}`,
+    text: buildEmailText({ clientName, createdAt, previewLines, submissionId }),
+    to: process.env.EMAIL_TO,
+  });
+}
+
+function buildEmailText({ clientName, createdAt, previewLines, submissionId }) {
+  const lines = [
+    "Novo briefing recebido pelo site da Voxion.",
+    "",
+    `Cliente: ${clientName}`,
+    `Data: ${formatDateForDisplay(createdAt)}`,
+    `Protocolo: ${submissionId}`,
+    "",
+    "Arquivos anexados:",
+    "- PDF do briefing",
+    "- TXT com as respostas",
+  ];
+
+  if (previewLines.length) {
+    lines.push("", "Prévia do conteúdo:");
+    lines.push(...previewLines);
+  }
+
+  return lines.join("\n");
+}
+
+function buildEmailHtml({ clientName, createdAt, previewLines, submissionId }) {
+  const preview = previewLines.length
+    ? `<div style="margin-top:24px"><strong>Previa do conteudo</strong><pre style="margin:12px 0 0;padding:16px;border-radius:12px;background:#fff7f2;border:1px solid #f0d7c3;white-space:pre-wrap;font-family:Arial,sans-serif">${escapeHtml(previewLines.join("\n"))}</pre></div>`
+    : "";
+
+  return `
+    <div style="font-family:Arial,sans-serif;background:#fffaf6;color:#31251f;padding:24px">
+      <div style="max-width:680px;margin:0 auto;background:#ffffff;border:1px solid #ead9cb;border-radius:18px;overflow:hidden">
+        <div style="height:10px;background:#f18536"></div>
+        <div style="padding:28px">
+          <h1 style="margin:0 0 18px;font-size:24px;color:#31251f">Novo briefing recebido</h1>
+          <p style="margin:0 0 20px;color:#5c4a41">O formulario do site recebeu uma nova submissao e os arquivos seguem anexados neste e-mail.</p>
+          <table style="width:100%;border-collapse:collapse">
+            <tr>
+              <td style="padding:10px 0;color:#5c4a41"><strong>Cliente</strong></td>
+              <td style="padding:10px 0;color:#31251f">${escapeHtml(clientName)}</td>
+            </tr>
+            <tr>
+              <td style="padding:10px 0;color:#5c4a41"><strong>Data</strong></td>
+              <td style="padding:10px 0;color:#31251f">${escapeHtml(formatDateForDisplay(createdAt))}</td>
+            </tr>
+            <tr>
+              <td style="padding:10px 0;color:#5c4a41"><strong>Protocolo</strong></td>
+              <td style="padding:10px 0;color:#31251f">${escapeHtml(submissionId)}</td>
+            </tr>
+          </table>
+          ${preview}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function parseBoolean(value, fallback) {
+  if (value == null || value === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
+class HttpError extends Error {
+  constructor(statusCode, message) {
+    super(message);
+    this.name = "HttpError";
+    this.statusCode = statusCode;
+  }
 }

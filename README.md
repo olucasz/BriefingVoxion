@@ -1,36 +1,72 @@
-# Voxion Briefing Backend
+# Voxion Briefing
 
-Este backend recebe as respostas do questionario, gera um PDF, salva uma copia em `submissions/` e envia o PDF por e-mail para `voxionstudio@gmail.com`.
+Aplicacao de briefing da Voxion pronta para deploy como app Node.js tradicional.
+
+## Estrutura
+
+- `public/`: frontend estatico do formulario
+- `server.js`: servidor HTTP, API, geracao de PDF e envio por e-mail
+- `submissions/`: pasta onde os PDFs e arquivos TXT sao salvos localmente
 
 ## Rodar localmente
 
-1. Copie `.env.example` para `.env`.
-2. Preencha `SMTP_PASS` com uma senha de app do Gmail ou credenciais SMTP equivalentes.
-3. Rode:
+1. Instale as dependencias:
 
 ```bash
-node backend/server.js
+npm install
 ```
 
-4. Acesse:
+2. Copie o arquivo de exemplo e ajuste as variaveis:
+
+```bash
+cp .env.example .env
+```
+
+3. Inicie o servidor:
+
+```bash
+npm start
+```
+
+4. Abra:
 
 ```txt
 http://127.0.0.1:8787
 ```
 
-## Configuracao de e-mail
-
-Para Gmail, a senha precisa ser uma **senha de app**, nao a senha normal da conta.
-
-Variaveis usadas:
+## Variaveis de ambiente
 
 ```txt
-EMAIL_TO=voxionstudio@gmail.com
-SMTP_HOST=smtp.gmail.com
+PORT=8787
+HOST=0.0.0.0
+
+EMAIL_TO=contato@seudominio.com
+SMTP_HOST=smtp.hostinger.com
 SMTP_PORT=465
-SMTP_USER=voxionstudio@gmail.com
-SMTP_PASS=sua-senha-de-app
-SMTP_FROM=voxionstudio@gmail.com
+SMTP_SECURE=true
+SMTP_USER=contato@seudominio.com
+SMTP_PASS=sua-senha-ou-app-password
+SMTP_FROM=contato@seudominio.com
+SMTP_FROM_NAME=Voxion Studio
 ```
 
-Se as credenciais SMTP nao estiverem configuradas, o backend ainda salva o PDF em `submissions/`, mas nao envia e-mail.
+Se o SMTP ou o `EMAIL_TO` nao estiverem configurados, o sistema continua gerando e salvando o PDF no servidor, mas nao envia e-mail.
+
+## Deploy na Hostinger
+
+As instrucoes resumidas estao em [HOSPEDAGEM_HOSTINGER.md](/Users/lucasz/Desktop/voxion-briefing/HOSPEDAGEM_HOSTINGER.md).
+
+## Arquivos para deploy
+
+Envie estes itens para a aplicacao Node.js na Hostinger:
+
+- `package.json`
+- `package-lock.json`
+- `server.js`
+- `public/`
+
+Nao envie:
+
+- `node_modules/`
+- `submissions/`
+- `.env` local da sua maquina

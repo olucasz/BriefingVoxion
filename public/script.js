@@ -417,18 +417,11 @@ function getClientName() {
 }
 
 function apiUrl(path) {
-  const host = window.location.hostname;
-  const isLocal = host === "localhost" || host === "127.0.0.1" || host === "";
-
-  if (!isLocal && (window.location.protocol === "http:" || window.location.protocol === "https:")) {
-    return "/.netlify/functions/briefings";
-  }
-
-  if (isLocal && window.location.port !== "8787") {
+  if (window.location.protocol === "file:") {
     return `http://127.0.0.1:8787${path}`;
   }
 
-  return `http://127.0.0.1:8787${path}`;
+  return path;
 }
 
 async function openExport() {
@@ -451,11 +444,11 @@ async function openExport() {
     if (!result.ok) throw new Error(result.error || "Nao foi possivel enviar.");
 
     if (result.emailSent) {
-      alert("Respostas enviadas para voxionstudio@gmail.com com o PDF em anexo.");
+      alert("Respostas enviadas com o PDF em anexo.");
     } else if (result.emailConfigured) {
       alert(`O PDF foi salvo, mas o e-mail nao foi enviado. Erro: ${result.emailError || "verifique o backend."}`);
     } else {
-      alert("O PDF foi salvo no backend, mas o envio de e-mail ainda precisa das credenciais SMTP no arquivo .env.");
+      alert("O PDF foi salvo no servidor, mas o envio de e-mail ainda precisa das credenciais SMTP e do EMAIL_TO no arquivo .env.");
     }
   } catch (error) {
     downloadPdf();
